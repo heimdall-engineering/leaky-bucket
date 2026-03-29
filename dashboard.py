@@ -21,6 +21,68 @@ st.set_page_config(
     layout="wide",
 )
 
+# ── Strategy Descriptions ────────────────────────────────────────────────
+
+STRATEGY_DESCRIPTIONS: dict[str, str] = {
+    "baseline": (
+        "**Baseline (greedy FIFO)** — Matches every waiting rider to the nearest "
+        "idle driver as fast as possible, with no throttling or coordination. "
+        "This is the control strategy: it maximizes individual responsiveness but "
+        "can flood the pickup zone and cause gridlock at scale."
+    ),
+    "leaky bucket": (
+        "**Leaky Bucket** — Rate-limits dispatches using a token bucket. A fixed "
+        "number of match tokens are available; tokens refill at a constant leak "
+        "rate. This smooths the outflow of drivers into the pickup zone, trading "
+        "slightly higher wait times for reduced congestion."
+    ),
+    "virtual queue": (
+        "**Virtual Queue** — Assigns riders to time-slotted departure windows and "
+        "offers an incentive discount for choosing a later slot. Spreads demand "
+        "over time so drivers aren't all summoned at once, reducing peak load on "
+        "the road network."
+    ),
+    "wave": (
+        "**Wave Dispatch** — Releases drivers in coordinated batches (waves). "
+        "A wave of N drivers is sent out, then new matches are held until a "
+        "completion threshold of the current wave returns. Prevents sustained "
+        "congestion by creating natural gaps in traffic flow."
+    ),
+    "adaptive": (
+        "**Adaptive Rate Limiting** — Dynamically adjusts the dispatch rate based "
+        "on real-time driver utilization. When many drivers are idle the rate "
+        "increases; when most are busy it throttles back. Balances throughput "
+        "against congestion without manual tuning."
+    ),
+    "surge pricing": (
+        "**Surge Pricing** — Applies a demand-based price multiplier when the "
+        "rider-to-driver ratio exceeds a threshold. Higher prices cause some "
+        "riders to defer, naturally spreading demand. Models the economic "
+        "feedback loop of real rideshare surge mechanics."
+    ),
+}
+
+# ── Metric Tooltips ─────────────────────────────────────────────────────
+
+METRIC_TIPS: dict[str, str] = {
+    # Rider Experience
+    "avg_wait_time": "Average time (seconds) riders spend waiting from request to vehicle arrival.",
+    "p95_wait_time": "95th percentile wait time — the worst 5% of rider experiences.",
+    "avg_etr": "Estimated Time to Request — predicted wait communicated to riders before matching.",
+    "match_failure_rate": "Percentage of match attempts that failed (e.g. driver couldn't route to pickup).",
+    # System Efficiency
+    "clearance_rate": "Passengers delivered per minute — the core evacuation throughput metric.",
+    "total_evacuation_pct": "Cumulative percentage of all riders who have been delivered to their destination.",
+    "delivered_count": "Number of riders successfully delivered out of total riders spawned.",
+    "dead_mileage_ratio": "Fraction of total driving distance spent without a passenger (empty cruising).",
+    # Supply & Quality
+    "driver_utilization": "Percentage of the fleet actively carrying or en route to a passenger.",
+    "braking_intensity": "Count of harsh braking events (deceleration below -4.5 m/s^2) per reporting interval. Proxy for congestion severity.",
+    "effective_eph": "Effective earnings per hour per driver, accounting for idle and dead-mileage time.",
+    "fleet_size": "Total number of driver vehicles in the simulation fleet.",
+}
+
+
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 
@@ -55,12 +117,12 @@ def render_rider_experience(df: pd.DataFrame) -> None:
 
     # Top metrics
     cols = st.columns(4)
-    cols[0].metric("Avg Wait Time", f"{latest['avg_wait_time']:.0f}s")
-    cols[1].metric("P95 Wait Time", f"{latest['p95_wait_time']:.0f}s")
+    cols[0].metric("Avg Wait Time", f"{latest['avg_wait_time']:.0f}s", help=METRIC_TIPS["avg_wait_time"])
+    cols[1].metric("P95 Wait Time", f"{latest['p95_wait_time']:.0f}s", help=METRIC_TIPS["p95_wait_time"])
     if safe_col(df, "avg_etr"):
-        cols[2].metric("Avg ETR", f"{latest['avg_etr']:.0f}s")
+        cols[2].metric("Avg ETR", f"{latest['avg_etr']:.0f}s", help=METRIC_TIPS["avg_etr"])
     if safe_col(df, "match_failure_rate"):
-        cols[3].metric("Match Failure", f"{latest['match_failure_rate']:.1f}%")
+        cols[3].metric("Match Failure", f"{latest['match_failure_rate']:.1f}%", help=METRIC_TIPS["match_failure_rate"])
 
     col_l, col_r = st.columns(2)
 
@@ -106,13 +168,13 @@ def render_system_efficiency(df: pd.DataFrame) -> None:
     latest = df.iloc[-1]
 
     cols = st.columns(4)
-    cols[0].metric("Clearance Rate", f"{latest['clearance_rate']:.1f}/min")
+    cols[0].metric("Clearance Rate", f"{latest['clearance_rate']:.1f}/min", help=METRIC_TIPS["clearance_rate"])
     if safe_col(df, "total_evacuation_pct"):
-        cols[1].metric("Evacuated", f"{latest['total_evacuation_pct']:.1f}%")
+        cols[1].metric("Evacuated", f"{latest['total_evacuation_pct']:.1f}%", help=METRIC_TIPS["total_evacuation_pct"])
     if safe_col(df, "riders_delivered") and safe_col(df, "riders_total"):
-        cols[2].metric("Delivered", f"{int(latest['riders_delivered'])} / {int(latest['riders_total'])}")
+        cols[2].metric("Delivered", f"{int(latest['riders_delivered'])} / {int(latest['riders_total'])}", help=METRIC_TIPS["delivered_count"])
     if safe_col(df, "dead_mileage_ratio"):
-        cols[3].metric("Dead Mileage", f"{latest['dead_mileage_ratio'] * 100:.1f}%")
+        cols[3].metric("Dead Mileage", f"{latest['dead_mileage_ratio'] * 100:.1f}%", help=METRIC_TIPS["dead_mileage_ratio"])
 
     col_l, col_r = st.columns(2)
 
@@ -149,16 +211,16 @@ def render_supply_quality(df: pd.DataFrame) -> None:
     latest = df.iloc[-1]
 
     cols = st.columns(4)
-    cols[0].metric("Driver Utilization", f"{latest['driver_utilization'] * 100:.1f}%")
-    cols[1].metric("Braking Events", f"{int(latest['braking_intensity'])}")
+    cols[0].metric("Driver Utilization", f"{latest['driver_utilization'] * 100:.1f}%", help=METRIC_TIPS["driver_utilization"])
+    cols[1].metric("Braking Events", f"{int(latest['braking_intensity'])}", help=METRIC_TIPS["braking_intensity"])
     if safe_col(df, "effective_eph"):
-        cols[2].metric("Earnings/Hour", f"${latest['effective_eph']:.0f}")
+        cols[2].metric("Earnings/Hour", f"${latest['effective_eph']:.0f}", help=METRIC_TIPS["effective_eph"])
     drivers_total = 0
     for c in ["drivers_idle", "drivers_en_route", "drivers_occupied", "drivers_returning"]:
         if safe_col(df, c):
             drivers_total += int(latest[c])
     if drivers_total:
-        cols[3].metric("Fleet Size", f"{drivers_total}")
+        cols[3].metric("Fleet Size", f"{drivers_total}", help=METRIC_TIPS["fleet_size"])
 
     col_l, col_r = st.columns(2)
 
@@ -209,6 +271,10 @@ def render_strategy(name: str, df: pd.DataFrame) -> None:
     if df.empty:
         st.warning(f"No data yet for {name}")
         return
+
+    desc = STRATEGY_DESCRIPTIONS.get(name)
+    if desc:
+        st.info(desc)
 
     render_rider_experience(df)
     st.divider()
