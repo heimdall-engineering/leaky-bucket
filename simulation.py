@@ -85,6 +85,7 @@ class Simulation:
             "-c", self.cfg.sumo_cfg,
             "--step-length", str(self.cfg.step_length),
             "--no-step-log", "true",
+            "--no-warnings", "true",
         ]
         traci.start(sumo_cmd)
         logger.info("SUMO started with strategy: %s", self.dispatcher.name())
@@ -178,8 +179,8 @@ class Simulation:
                 if other == cand:
                     continue
                 try:
-                    r1 = traci.simulation.findRoute(cand, other)
-                    r2 = traci.simulation.findRoute(other, cand)
+                    r1 = traci.simulation.findRoute(cand, other, vType="uberx")
+                    r2 = traci.simulation.findRoute(other, cand, vType="uberx")
                     if r1.edges and r2.edges:
                         score += 1
                 except traci.TraCIException:
@@ -197,8 +198,8 @@ class Simulation:
                 pickup_edges.append(edge)
                 continue
             try:
-                r1 = traci.simulation.findRoute(best_anchor, edge)
-                r2 = traci.simulation.findRoute(edge, best_anchor)
+                r1 = traci.simulation.findRoute(best_anchor, edge, vType="uberx")
+                r2 = traci.simulation.findRoute(edge, best_anchor, vType="uberx")
                 if r1.edges and r2.edges:
                     pickup_edges.append(edge)
             except traci.TraCIException:
@@ -219,8 +220,8 @@ class Simulation:
         peripheral_edges = []
         for edge in candidate_peripheral:
             try:
-                r1 = traci.simulation.findRoute(best_anchor, edge)
-                r2 = traci.simulation.findRoute(edge, best_anchor)
+                r1 = traci.simulation.findRoute(best_anchor, edge, vType="uberx")
+                r2 = traci.simulation.findRoute(edge, best_anchor, vType="uberx")
                 if r1.edges and r2.edges:
                     peripheral_edges.append(edge)
             except traci.TraCIException:
@@ -245,8 +246,8 @@ class Simulation:
             for d in sample_periph:
                 total += 1
                 try:
-                    r1 = traci.simulation.findRoute(p, d)
-                    r2 = traci.simulation.findRoute(d, p)
+                    r1 = traci.simulation.findRoute(p, d, vType="uberx")
+                    r2 = traci.simulation.findRoute(d, p, vType="uberx")
                     if r1.edges and r2.edges:
                         success += 1
                 except traci.TraCIException:
@@ -270,7 +271,7 @@ class Simulation:
     def _validate_route(self, from_edge: str, to_edge: str) -> bool:
         """Check if a route exists between two edges."""
         try:
-            route = traci.simulation.findRoute(from_edge, to_edge)
+            route = traci.simulation.findRoute(from_edge, to_edge, vType="uberx")
             return bool(route.edges)
         except traci.TraCIException:
             return False
@@ -323,13 +324,29 @@ class Simulation:
         """Give an idle vehicle a new destination to prevent SUMO removal.
 
         Vehicles are removed when they reach the end of their route.
-        Keep them alive by routing toward a random pickup edge.
+        Keep them alive by routing to a random peripheral edge — NOT toward
+        the pickup zone, so idle drivers don't congest the area that dispatch
+        strategies are trying to control.
         """
         try:
-            target = random.choice(self._pickup_edges)
-            traci.vehicle.changeTarget(vehicle_id, target)
+            current_edge = traci.vehicle.getRoadID(vehicle_id)
         except traci.TraCIException:
-            pass
+            return
+        if not current_edge or current_edge.startswith(":"):
+            return
+
+        # Try a few random peripheral edges to find a routable one
+        for _ in range(5):
+            target = random.choice(self._peripheral_edges)
+            if target == current_edge:
+                continue
+            try:
+                route = traci.simulation.findRoute(current_edge, target, vType="uberx")
+                if route.edges:
+                    traci.vehicle.changeTarget(vehicle_id, target)
+                    return
+            except traci.TraCIException:
+                continue
 
     def _spawn_drivers(self) -> None:
         """Spawn the driver fleet on edges verified routable to pickup zone."""
@@ -361,10 +378,12 @@ class Simulation:
                     depart="now",
                     departPos="base",
                 )
-                # Route toward a pickup edge so vehicle stays alive
+                # Route toward a peripheral edge so vehicle stays alive
                 # (vehicles at the end of their route get removed by SUMO)
-                pickup_target = random.choice(self._pickup_edges)
-                traci.vehicle.changeTarget(vehicle_id, pickup_target)
+                # Use peripheral edges — NOT pickup — so idle drivers don't
+                # congest the pickup zone before being dispatched.
+                idle_target = random.choice(self._peripheral_edges)
+                traci.vehicle.changeTarget(vehicle_id, idle_target)
                 spawned += 1
             except traci.TraCIException as e:
                 logger.debug("Could not add vehicle %s: %s", vehicle_id, e)
@@ -564,6 +583,24 @@ class Simulation:
         self.start()
         self._spawn_drivers()
 
+        # Warm-up: let drivers enter the network and spread out before
+        # riders appear. SUMO inserts queued vehicles gradually (~30-50/step),
+        # so we need enough steps for the full fleet to be on the road.
+        warmup_steps = max(300, self.cfg.num_drivers // 5)
+        logger.info("Running %d warm-up steps to populate driver fleet...", warmup_steps)
+        for w in range(warmup_steps):
+            traci.simulationStep()
+            self._update_driver_states(w)
+
+        alive = sum(
+            1 for d in self.drivers.values()
+            if d.vehicle_id in self._active_vehicles
+        )
+        logger.info(
+            "Warm-up complete: %d / %d drivers alive in SUMO",
+            alive, len(self.drivers),
+        )
+
         try:
             for step in range(self.cfg.sim_duration):
                 traci.simulationStep()
@@ -571,16 +608,6 @@ class Simulation:
                 self._spawn_burst(step)
                 self._update_driver_states(step)
                 self._dispatch(step)
-
-                if step == 10:
-                    alive = sum(
-                        1 for d in self.drivers.values()
-                        if d.vehicle_id in self._active_vehicles
-                    )
-                    logger.info(
-                        "Step 10 fleet check: %d / %d vehicles alive in SUMO",
-                        alive, len(self.drivers),
-                    )
 
                 # Track hard braking every step
                 braking = self._count_hard_braking()

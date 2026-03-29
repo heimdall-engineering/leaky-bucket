@@ -101,20 +101,20 @@ class KPITracker:
         riders_total = len(riders)
 
         # --- Panel 1: Rider Experience ---
-        wait_times = []
-        etr_times = []  # time spent waiting before being matched
+        wait_times = []  # all riders (including still-waiting)
+        served_wait_times = []  # only riders who were matched/picked-up/delivered
         for r in riders.values():
             if r.wait_time is not None:
                 wait_times.append(r.wait_time)
-                etr_times.append(r.wait_time)
+                served_wait_times.append(r.wait_time)
             elif r.state == RiderState.WAITING:
                 elapsed = step - r.request_time
                 wait_times.append(elapsed)
-                etr_times.append(elapsed)
 
         avg_wait = float(np.mean(wait_times)) if wait_times else 0.0
-        p95_wait = float(np.percentile(wait_times, 95)) if wait_times else 0.0
-        avg_etr = float(np.mean(etr_times)) if etr_times else 0.0
+        # P95 over served riders only — otherwise it's always pegged at sim duration
+        p95_wait = float(np.percentile(served_wait_times, 95)) if served_wait_times else 0.0
+        avg_etr = float(np.mean(wait_times)) if wait_times else 0.0
 
         # Match failure rate: riders still waiting after 5 minutes (300 steps)
         match_failure_threshold = 300
