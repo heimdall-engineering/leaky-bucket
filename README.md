@@ -2,9 +2,15 @@
 
 A 2D microscopic traffic simulation that evaluates ride-share dispatching strategies for clearing high-density passenger bursts (e.g., a stadium emptying after an event). Built on [Eclipse SUMO](https://www.eclipse.org/sumo/) and controlled via Python's `traci` interface.
 
+## Venue
+
+The simulation models post-event evacuation at **Levi's Stadium** in Santa Clara, CA (capacity ~68,500). The SUMO network is built from OpenStreetMap data within a 2 km radius of the stadium, capturing the real road network including one-way streets, highway on-ramps, and local arterials.
+
+At a typical sellout, an estimated 30–40% of attendees request rideshare (~20,000–30,000 riders). The default configuration uses 2,000 passengers / 200 drivers for fast iteration; realistic full-scale runs use **30,000 passengers / 3,000 drivers**.
+
 ## The Problem
 
-When thousands of passengers simultaneously request rides from a single location, naive dispatching floods the pickup zone with vehicles, causing gridlock. The simulation defaults to 2,000 passengers and 200 drivers, but scales up to large events (e.g., 40,000+ passengers). It compares six dispatch strategies:
+When thousands of passengers simultaneously request rides from a single location, naive dispatching floods the pickup zone with vehicles, causing gridlock. It compares six dispatch strategies:
 
 - **Baseline (Naive)** — Immediately match each request to the nearest available driver.
 - **Leaky Bucket (Rate Limiting)** — Throttle matches using a token bucket to prevent too many vehicles entering the pickup zone at once.
@@ -80,20 +86,15 @@ To compare all six strategies in parallel:
 
 ### Scaling Up
 
-Strategy parameters auto-scale with passenger count. Scale the simulation to larger events:
+Strategy parameters auto-scale with passenger count. A good rule of thumb is ~1 driver per 10 passengers.
 
 ```bash
-# Large-scale event (40,000 passengers, 4,000 drivers)
-./run.sh --strategy baseline --passengers 40000 --drivers 4000
+# Realistic Levi's Stadium sellout (~40% rideshare mode share)
+./run.sh --compare --passengers 30000 --drivers 3000
 
-# Compare all strategies at scale
-./run.sh --compare --passengers 40000 --drivers 4000
-
-# Longer simulation for large bursts
+# Stress test at higher mode share
 ./run.sh --compare --passengers 40000 --drivers 4000 --duration 14400
 ```
-
-A good rule of thumb is ~1 driver per 10 passengers to ensure reasonable clearance times.
 
 ## Manual Usage
 
@@ -163,6 +164,18 @@ Previous output is automatically cleared at the start of each run.
 ## Dashboard
 
 The Streamlit dashboard (`dashboard.py`) provides live visualization organized into three panels: Rider Experience, System Efficiency, and Supply & Quality. When multiple strategy runs are present, it shows a **Comparison** tab with overlay charts and a summary table.
+
+## Network Connectivity
+
+The SUMO road network contains one-way streets and disconnected sub-networks that can prevent routing between arbitrary edges. The simulation uses a **pickup-zone-anchored** connectivity filter at startup:
+
+1. Identifies candidate pickup edges near the stadium centroid (within `pickup_radius`)
+2. Selects an **anchor edge** with the best connectivity to other pickup candidates
+3. Filters pickup edges to those mutually routable with the anchor (to/from)
+4. Filters peripheral edges (driver spawn points, rider destinations) the same way
+5. Verifies a sample of pickup-to-peripheral routes and logs the success rate
+
+Drivers are spawned only on edges verified routable to the pickup zone (with retries), ensuring the full fleet participates in dispatching rather than being stranded on unreachable streets.
 
 ## Project Structure
 

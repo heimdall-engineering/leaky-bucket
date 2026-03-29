@@ -111,91 +111,28 @@ class Simulation:
                     break
         logger.info("Network has %d passenger-accessible edges", len(candidate_edges))
 
-        # Filter to fully connected edges using exhaustive hub test
-        self._edge_cache = self._filter_connected_edges(candidate_edges)
-        logger.info("Connected component: %d edges", len(self._edge_cache))
+        # Build verified edges anchored to the pickup zone
+        self._pickup_edges, self._peripheral_edges, self._edge_cache = (
+            self._build_verified_edges(candidate_edges)
+        )
+        logger.info(
+            "Verified edges: %d pickup, %d peripheral, %d total",
+            len(self._pickup_edges), len(self._peripheral_edges), len(self._edge_cache),
+        )
 
-        # Identify pickup-zone edges (near stadium center)
-        self._pickup_edges = self._find_edges_near_center()
-        if not self._pickup_edges:
-            logger.warning("No edges found near stadium center, using first 10 edges")
-            self._pickup_edges = self._edge_cache[:10]
+    def _build_verified_edges(
+        self, edges: list[str]
+    ) -> tuple[list[str], list[str], list[str]]:
+        """Build pickup and peripheral edge sets anchored to the pickup zone.
 
-        # Pre-compute peripheral edges (excluding pickup zone)
-        pickup_set = set(self._pickup_edges)
-        self._peripheral_edges = [e for e in self._edge_cache if e not in pickup_set]
-        if not self._peripheral_edges:
-            self._peripheral_edges = self._edge_cache
-
-    def _filter_connected_edges(self, edges: list[str]) -> list[str]:
-        """Keep only edges that can route to AND from a reference hub edge.
-
-        Tests every edge exhaustively against the hub for bidirectional
-        reachability, ensuring all returned edges can reach each other.
+        Returns (pickup_edges, peripheral_edges, all_verified_edges).
         """
         if not edges:
-            return edges
+            return [], [], []
 
-        # Pick the best hub from candidates
-        candidates = random.sample(edges, min(20, len(edges)))
-        best_hub = candidates[0]
-        best_count = 0
-
-        for candidate in candidates:
-            count = 0
-            test_targets = random.sample(edges, min(50, len(edges)))
-            for target in test_targets:
-                try:
-                    r1 = traci.simulation.findRoute(candidate, target)
-                    r2 = traci.simulation.findRoute(target, candidate)
-                    if r1.edges and r2.edges:
-                        count += 1
-                except traci.TraCIException:
-                    continue
-            if count > best_count:
-                best_count = count
-                best_hub = candidate
-
-        logger.info("Testing reachability for %d edges against hub '%s'...", len(edges), best_hub)
-
-        # Test EVERY edge against the hub
-        reachable = []
-        for edge in edges:
-            if edge == best_hub:
-                reachable.append(edge)
-                continue
-            try:
-                r1 = traci.simulation.findRoute(best_hub, edge)
-                r2 = traci.simulation.findRoute(edge, best_hub)
-                if r1.edges and r2.edges:
-                    reachable.append(edge)
-            except traci.TraCIException:
-                continue
-
-        # Verify: cross-check a sample of reachable edges against each other
-        if len(reachable) > 10:
-            sample = random.sample(reachable, min(50, len(reachable)))
-            bad = set()
-            for i, a in enumerate(sample):
-                for b in sample[i+1:]:
-                    try:
-                        r = traci.simulation.findRoute(a, b)
-                        if not r.edges:
-                            bad.add(a)
-                            bad.add(b)
-                    except traci.TraCIException:
-                        bad.add(a)
-                        bad.add(b)
-            if bad:
-                logger.info("Cross-check removed %d unreliable edges", len(bad))
-                reachable = [e for e in reachable if e not in bad]
-
-        return reachable
-
-    def _find_edges_near_center(self) -> list[str]:
-        """Find edges within pickup_radius of the network center."""
-        edges_with_pos = []
-        for edge_id in self._edge_cache:
+        # --- Step 1: Find candidate pickup edges near the network centroid ---
+        edges_with_pos: list[tuple[str, float, float]] = []
+        for edge_id in edges:
             try:
                 lane_id = f"{edge_id}_0"
                 shape = traci.lane.getShape(lane_id)
@@ -206,21 +143,121 @@ class Simulation:
                 continue
 
         if not edges_with_pos:
-            return []
+            return [], [], []
 
-        # Compute centroid
         cx = sum(x for _, x, y in edges_with_pos) / len(edges_with_pos)
         cy = sum(y for _, x, y in edges_with_pos) / len(edges_with_pos)
 
-        # Find edges near centroid
-        near_edges = []
+        candidate_pickup = []
         for edge_id, x, y in edges_with_pos:
             dist = ((x - cx) ** 2 + (y - cy) ** 2) ** 0.5
             if dist < self.cfg.pickup_radius:
-                near_edges.append(edge_id)
+                candidate_pickup.append(edge_id)
 
-        logger.info("Found %d edges within %.0fm of network center", len(near_edges), self.cfg.pickup_radius)
-        return near_edges
+        if not candidate_pickup:
+            logger.warning("No edges near centroid, using 10 random edges as pickup")
+            candidate_pickup = [e for e, _, _ in edges_with_pos[:10]]
+
+        logger.info(
+            "Found %d candidate pickup edges within %.0fm of centroid",
+            len(candidate_pickup), self.cfg.pickup_radius,
+        )
+
+        # --- Step 2: Pick an anchor from candidate pickup edges ---
+        # Choose the anchor with the best connectivity to other pickup candidates
+        anchor_candidates = random.sample(
+            candidate_pickup, min(10, len(candidate_pickup))
+        )
+        best_anchor = anchor_candidates[0]
+        best_score = 0
+        for cand in anchor_candidates:
+            score = 0
+            for other in random.sample(
+                candidate_pickup, min(20, len(candidate_pickup))
+            ):
+                if other == cand:
+                    continue
+                try:
+                    r1 = traci.simulation.findRoute(cand, other)
+                    r2 = traci.simulation.findRoute(other, cand)
+                    if r1.edges and r2.edges:
+                        score += 1
+                except traci.TraCIException:
+                    continue
+            if score > best_score:
+                best_score = score
+                best_anchor = cand
+
+        logger.info("Pickup anchor: '%s' (score %d)", best_anchor, best_score)
+
+        # --- Step 3: Filter pickup edges — must route to AND from anchor ---
+        pickup_edges = []
+        for edge in candidate_pickup:
+            if edge == best_anchor:
+                pickup_edges.append(edge)
+                continue
+            try:
+                r1 = traci.simulation.findRoute(best_anchor, edge)
+                r2 = traci.simulation.findRoute(edge, best_anchor)
+                if r1.edges and r2.edges:
+                    pickup_edges.append(edge)
+            except traci.TraCIException:
+                continue
+
+        logger.info(
+            "Pickup zone: %d / %d edges mutually routable with anchor",
+            len(pickup_edges), len(candidate_pickup),
+        )
+
+        if not pickup_edges:
+            pickup_edges = [best_anchor]
+
+        # --- Step 4: Filter peripheral edges — must route to AND from anchor ---
+        pickup_set = set(pickup_edges)
+        candidate_peripheral = [e for e in edges if e not in pickup_set]
+
+        peripheral_edges = []
+        for edge in candidate_peripheral:
+            try:
+                r1 = traci.simulation.findRoute(best_anchor, edge)
+                r2 = traci.simulation.findRoute(edge, best_anchor)
+                if r1.edges and r2.edges:
+                    peripheral_edges.append(edge)
+            except traci.TraCIException:
+                continue
+
+        logger.info(
+            "Peripheral: %d / %d edges mutually routable with anchor",
+            len(peripheral_edges), len(candidate_peripheral),
+        )
+
+        if not peripheral_edges:
+            peripheral_edges = list(pickup_edges)
+
+        all_verified = pickup_edges + peripheral_edges
+
+        # --- Step 5: Log route-verification sample ---
+        sample_pickup = random.sample(pickup_edges, min(10, len(pickup_edges)))
+        sample_periph = random.sample(peripheral_edges, min(50, len(peripheral_edges)))
+        success = 0
+        total = 0
+        for p in sample_pickup:
+            for d in sample_periph:
+                total += 1
+                try:
+                    r1 = traci.simulation.findRoute(p, d)
+                    r2 = traci.simulation.findRoute(d, p)
+                    if r1.edges and r2.edges:
+                        success += 1
+                except traci.TraCIException:
+                    continue
+        if total:
+            logger.info(
+                "Route verification: %d / %d pickup↔peripheral pairs succeed (%.0f%%)",
+                success, total, 100 * success / total,
+            )
+
+        return pickup_edges, peripheral_edges, all_verified
 
     def _random_peripheral_edge(self) -> str:
         """Pick a random edge from the network periphery (destinations)."""
@@ -283,12 +320,23 @@ class Simulation:
         logger.info("Successfully spawned %d / %d riders", spawned, self.cfg.num_passengers)
 
     def _spawn_drivers(self) -> None:
-        """Spawn the driver fleet at simulation start."""
+        """Spawn the driver fleet on edges verified routable to pickup zone."""
         logger.info("Spawning %d drivers", self.cfg.num_drivers)
         spawned = 0
         for i in range(self.cfg.num_drivers):
             vehicle_id = f"driver_{i}"
-            staging = self._random_peripheral_edge()
+
+            # Pick a peripheral edge that can route to at least one pickup edge
+            staging = None
+            for _ in range(5):
+                candidate = self._random_peripheral_edge()
+                pickup_target = random.choice(self._pickup_edges)
+                if self._validate_route(candidate, pickup_target):
+                    staging = candidate
+                    break
+            if staging is None:
+                # Fall back to any peripheral edge
+                staging = self._random_peripheral_edge()
 
             driver = Driver(vehicle_id=vehicle_id, staging_edge=staging)
             self.drivers[vehicle_id] = driver
