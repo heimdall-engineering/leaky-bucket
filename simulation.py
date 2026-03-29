@@ -40,7 +40,6 @@ class Simulation:
         )
         self._edge_cache: list[str] = []
         self._pickup_edges: list[str] = []
-        self._blacklisted_edges: set[str] = set()
 
     def _create_dispatcher(self) -> BaseDispatcher:
         if self.cfg.strategy == Strategy.BASELINE:
@@ -441,11 +440,12 @@ class Simulation:
 
         matches = self.dispatcher.step(step, waiting, idle)
 
+        succeeded = 0
+        failed = 0
         for rider, driver in matches:
             rider.state = RiderState.MATCHED
             rider.match_time = step
             rider.assigned_driver = driver.vehicle_id
-
             driver.dispatch_to(rider.person_id, rider.origin_edge, rider.dest_edge)
 
             # Get driver's current edge
@@ -457,30 +457,17 @@ class Simulation:
             # Skip if vehicle is on an internal/junction edge
             if not current_edge or current_edge.startswith(":"):
                 self._undo_match(rider, driver)
-                continue
-
-            # Validate the full route chain: current -> pickup -> dest
-            if not self._validate_route(current_edge, rider.origin_edge):
-                self._blacklist_edge(rider.origin_edge)
-                self._undo_match(rider, driver)
-                continue
-
-            if not self._validate_route(rider.origin_edge, rider.dest_edge):
-                self._blacklist_edge(rider.dest_edge)
-                self._undo_match(rider, driver)
-                # Mark rider as failed — dest is unreachable
-                rider.state = RiderState.DELIVERED
-                try:
-                    traci.person.remove(rider.person_id)
-                except traci.TraCIException:
-                    pass
+                failed += 1
                 continue
 
             try:
                 traci.vehicle.changeTarget(driver.vehicle_id, rider.origin_edge)
+                succeeded += 1
             except traci.TraCIException:
-                self._blacklist_edge(rider.origin_edge)
                 self._undo_match(rider, driver)
+                failed += 1
+
+        self.dispatcher.notify_dispatch_result(succeeded, failed)
 
     def _undo_match(self, rider: Rider, driver: Driver) -> None:
         """Revert a failed match so both rider and driver are available again."""
@@ -489,16 +476,6 @@ class Simulation:
         rider.match_time = None
         rider.assigned_driver = None
         driver.arrive_staging()
-
-    def _blacklist_edge(self, edge_id: str) -> None:
-        """Mark an edge as unreachable and remove it from caches."""
-        if edge_id in self._blacklisted_edges:
-            return
-        self._blacklisted_edges.add(edge_id)
-        self._edge_cache = [e for e in self._edge_cache if e != edge_id]
-        self._pickup_edges = [e for e in self._pickup_edges if e != edge_id]
-        self._peripheral_edges = [e for e in self._peripheral_edges if e != edge_id]
-        logger.debug("Blacklisted edge %s (total blacklisted: %d)", edge_id, len(self._blacklisted_edges))
 
     def _measure_gridlock(self) -> float:
         """Compute average speed of vehicles within gridlock_radius of the stadium."""
@@ -589,7 +566,4 @@ class Simulation:
             self.kpi.compute_snapshot(step, self.riders, self.drivers, gridlock_speed)
             self.kpi.close()
             traci.close()
-            logger.info(
-                "Simulation complete. Blacklisted %d edges during run.",
-                len(self._blacklisted_edges),
-            )
+            logger.info("Simulation complete.")

@@ -35,6 +35,13 @@ class BaseDispatcher(ABC):
         """
         ...
 
+    def notify_dispatch_result(self, succeeded: int, failed: int) -> None:
+        """Called by _dispatch after processing matches.
+
+        Subclasses can override to adjust internal state based on how many
+        matches were actually accepted vs rejected by the simulation.
+        """
+
     @abstractmethod
     def name(self) -> str:
         """Human-readable strategy name."""
