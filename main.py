@@ -160,9 +160,12 @@ def main() -> None:
 
     bucket_size = args.bucket_size if args.bucket_size is not None else max(30, int(30 * scale))
     leak_rate = args.leak_rate if args.leak_rate is not None else max(10.0, 10.0 * scale)
-    num_slots = args.num_slots if args.num_slots is not None else max(20, int(20 * scale))
     slot_duration = args.slot_duration if args.slot_duration is not None else 120
-    wave_size = args.wave_size if args.wave_size is not None else max(50, int(50 * scale))
+    # Cap num_slots so all slots fit within the sim duration
+    max_slots = max(1, args.duration // slot_duration)
+    num_slots = args.num_slots if args.num_slots is not None else min(max_slots, max(20, int(20 * scale)))
+    # Wave size should be a fraction of driver count, not passenger count
+    wave_size = args.wave_size if args.wave_size is not None else max(50, args.drivers // 4)
     adaptive_min = args.adaptive_min_rate if args.adaptive_min_rate is not None else max(2.0, 2.0 * scale)
     adaptive_max = args.adaptive_max_rate if args.adaptive_max_rate is not None else max(60.0, 60.0 * scale)
 
