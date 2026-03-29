@@ -40,6 +40,7 @@ class Simulation:
         )
         self._edge_cache: list[str] = []
         self._pickup_edges: list[str] = []
+        self._active_vehicles: set[str] = set()
 
     def _create_dispatcher(self) -> BaseDispatcher:
         if self.cfg.strategy == Strategy.BASELINE:
@@ -318,6 +319,18 @@ class Simulation:
 
         logger.info("Successfully spawned %d / %d riders", spawned, self.cfg.num_passengers)
 
+    def _reroute_idle(self, vehicle_id: str) -> None:
+        """Give an idle vehicle a new destination to prevent SUMO removal.
+
+        Vehicles are removed when they reach the end of their route.
+        Keep them alive by routing toward a random pickup edge.
+        """
+        try:
+            target = random.choice(self._pickup_edges)
+            traci.vehicle.changeTarget(vehicle_id, target)
+        except traci.TraCIException:
+            pass
+
     def _spawn_drivers(self) -> None:
         """Spawn the driver fleet on edges verified routable to pickup zone."""
         logger.info("Spawning %d drivers", self.cfg.num_drivers)
@@ -341,20 +354,17 @@ class Simulation:
             self.drivers[vehicle_id] = driver
 
             try:
-                lane_length = traci.lane.getLength(f"{staging}_0")
-                max_pos = lane_length - 5.0
-                if max_pos > 0.1:
-                    dep_pos = str(random.uniform(0, max_pos))
-                else:
-                    dep_pos = "base"
                 traci.vehicle.add(
                     vehicle_id,
                     routeID="",
                     typeID="uberx",
                     depart="now",
-                    departPos=dep_pos,
+                    departPos="base",
                 )
-                traci.vehicle.changeTarget(vehicle_id, staging)
+                # Route toward a pickup edge so vehicle stays alive
+                # (vehicles at the end of their route get removed by SUMO)
+                pickup_target = random.choice(self._pickup_edges)
+                traci.vehicle.changeTarget(vehicle_id, pickup_target)
                 spawned += 1
             except traci.TraCIException as e:
                 logger.debug("Could not add vehicle %s: %s", vehicle_id, e)
@@ -363,12 +373,12 @@ class Simulation:
 
     def _update_driver_states(self, step: int) -> None:
         """Check traci state and update driver agents."""
-        active_vehicles = set(traci.vehicle.getIDList())
+        self._active_vehicles = set(traci.vehicle.getIDList())
 
         for vid, driver in self.drivers.items():
             driver.tick()
 
-            if vid not in active_vehicles:
+            if vid not in self._active_vehicles:
                 continue
 
             if driver.state == DriverState.EN_ROUTE_TO_PICKUP:
@@ -401,11 +411,22 @@ class Simulation:
             elif driver.state == DriverState.RETURNING_TO_STAGING:
                 # Immediately mark idle — no need to route back to staging
                 driver.arrive_staging()
-                # Update staging edge to wherever the driver currently is
+                # Update staging edge and keep vehicle alive
                 try:
                     current_edge = traci.vehicle.getRoadID(vid)
                     if current_edge and not current_edge.startswith(":"):
                         driver.staging_edge = current_edge
+                except traci.TraCIException:
+                    pass
+                self._reroute_idle(vid)
+
+            elif driver.state == DriverState.IDLE:
+                # Keep vehicle alive — reroute if near end of route
+                try:
+                    route = traci.vehicle.getRoute(vid)
+                    current_edge = traci.vehicle.getRoadID(vid)
+                    if route and current_edge == route[-1]:
+                        self._reroute_idle(vid)
                 except traci.TraCIException:
                     pass
 
@@ -429,11 +450,16 @@ class Simulation:
                 driver.staging_edge = current_edge
         except traci.TraCIException:
             pass
+        # Keep vehicle alive by giving it a new destination
+        self._reroute_idle(driver.vehicle_id)
 
     def _dispatch(self, step: int) -> None:
         """Run the dispatcher to match waiting riders with idle drivers."""
         waiting = [r for r in self.riders.values() if r.state == RiderState.WAITING]
-        idle = [d for d in self.drivers.values() if d.state == DriverState.IDLE]
+        idle = [
+            d for d in self.drivers.values()
+            if d.state == DriverState.IDLE and d.vehicle_id in self._active_vehicles
+        ]
 
         if not waiting or not idle:
             return
@@ -443,14 +469,16 @@ class Simulation:
         succeeded = 0
         failed = 0
         for rider, driver in matches:
+            vid = driver.vehicle_id
+
             rider.state = RiderState.MATCHED
             rider.match_time = step
-            rider.assigned_driver = driver.vehicle_id
+            rider.assigned_driver = vid
             driver.dispatch_to(rider.person_id, rider.origin_edge, rider.dest_edge)
 
             # Get driver's current edge
             try:
-                current_edge = traci.vehicle.getRoadID(driver.vehicle_id)
+                current_edge = traci.vehicle.getRoadID(vid)
             except traci.TraCIException:
                 current_edge = ""
 
@@ -461,7 +489,7 @@ class Simulation:
                 continue
 
             try:
-                traci.vehicle.changeTarget(driver.vehicle_id, rider.origin_edge)
+                traci.vehicle.changeTarget(vid, rider.origin_edge)
                 succeeded += 1
             except traci.TraCIException:
                 self._undo_match(rider, driver)
@@ -543,6 +571,16 @@ class Simulation:
                 self._spawn_burst(step)
                 self._update_driver_states(step)
                 self._dispatch(step)
+
+                if step == 10:
+                    alive = sum(
+                        1 for d in self.drivers.values()
+                        if d.vehicle_id in self._active_vehicles
+                    )
+                    logger.info(
+                        "Step 10 fleet check: %d / %d vehicles alive in SUMO",
+                        alive, len(self.drivers),
+                    )
 
                 # Track hard braking every step
                 braking = self._count_hard_braking()

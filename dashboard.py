@@ -272,9 +272,12 @@ def render_strategy(name: str, df: pd.DataFrame) -> None:
         st.warning(f"No data yet for {name}")
         return
 
-    desc = STRATEGY_DESCRIPTIONS.get(name)
-    if desc:
-        st.info(desc)
+    # Match strategy description by lowercase prefix (tab names include params)
+    name_lower = name.lower()
+    for key, desc in STRATEGY_DESCRIPTIONS.items():
+        if name_lower.startswith(key):
+            st.info(desc)
+            break
 
     render_rider_experience(df)
     st.divider()
