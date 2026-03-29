@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# SUMO generated files
+network/stadium.osm
+network/stadium.net.xml
+network/stadium.rou.xml
+network/stadium.sumocfg
+network/vehicle_types.xml
+
+# Output
+output/
